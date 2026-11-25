@@ -31,16 +31,7 @@ jobs:
                   minSdk 26
                   targetSdk 33
                   versionCode 2
-                  versionName '2.0'
-              }
-              signingConfigs {
-                  debug {
-                      storeFile rootProject.file('bloodknife.p12')
-                      storePassword 'bloodknife'
-                      keyAlias 'bloodknife'
-                      keyPassword 'bloodknife'
-                      storeType 'pkcs12'
-                  }
+                  versionName '1.1'
               }
               buildTypes {
                   release { minifyEnabled false }

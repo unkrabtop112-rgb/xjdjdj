@@ -1,0 +1,1860 @@
+name: Build APK
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.7
+      - name: Create project files and build
+        run: |
+          mkdir -p 'app'
+          cat > 'app/build.gradle' <<'PINSKIN_EOF'
+          plugins {
+              id 'com.android.application'
+          }
+
+          android {
+              namespace 'com.pinskin.lsp'
+              compileSdk 34
+
+              defaultConfig {
+                  applicationId 'com.pinskin.lsp'
+                  minSdk 26
+                  targetSdk 33
+                  versionCode 2
+                  versionName '2.0'
+              }
+              signingConfigs {
+                  debug {
+                      storeFile rootProject.file('bloodknife.p12')
+                      storePassword 'bloodknife'
+                      keyAlias 'bloodknife'
+                      keyPassword 'bloodknife'
+                      storeType 'pkcs12'
+                  }
+              }
+              buildTypes {
+                  release { minifyEnabled false }
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+
+          dependencies {
+              compileOnly 'de.robv.android.xposed:api:82'
+          }
+          PINSKIN_EOF
+          mkdir -p 'app/src/main'
+          cat > 'app/src/main/AndroidManifest.xml' <<'PINSKIN_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <application
+                  android:label="@string/app_name"
+                  android:icon="@mipmap/ic_launcher"
+                  android:roundIcon="@mipmap/ic_launcher"
+                  android:theme="@style/AppTheme"
+                  android:allowBackup="false">
+
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <provider
+                      android:name=".ConfigProvider"
+                      android:authorities="com.pinskin.lsp.config"
+                      android:exported="true"
+                      android:directBootAware="true" />
+
+                  <meta-data android:name="xposedmodule" android:value="true" />
+                  <meta-data android:name="xposeddescription" android:value="@string/xposed_desc" />
+                  <meta-data android:name="xposedminversion" android:value="82" />
+                  <meta-data android:name="xposedscope" android:resource="@array/xposed_scope" />
+              </application>
+          </manifest>
+          PINSKIN_EOF
+          mkdir -p 'app/src/main/assets'
+          cat > 'app/src/main/assets/xposed_init' <<'PINSKIN_EOF'
+          com.pinskin.lsp.Hook
+          PINSKIN_EOF
+          mkdir -p 'app/src/main/java/com/pinskin/lsp'
+          cat > 'app/src/main/java/com/pinskin/lsp/AuroraView.java' <<'PINSKIN_EOF'
+          package com.pinskin.lsp;
+
+          import android.animation.ValueAnimator;
+          import android.content.Context;
+          import android.graphics.Canvas;
+          import android.graphics.Matrix;
+          import android.graphics.Paint;
+          import android.graphics.RadialGradient;
+          import android.graphics.Shader;
+          import android.view.View;
+          import android.view.animation.LinearInterpolator;
+
+          /** Медленно плывущие цветные пятна на тёмном фоне: то, что «просвечивает» сквозь стекло. */
+          public final class AuroraView extends View {
+              // cx, cy, radius (доля от большей стороны), цвет, скорость (целое: цикл замкнут), фаза
+              private static final float[][] BLOBS = {
+                      {0.15f, 0.10f, 0.75f, 0, 1, 0.0f},
+                      {0.90f, 0.45f, 0.80f, 1, 1, 2.1f},
+                      {0.20f, 0.88f, 0.85f, 2, 2, 4.0f},
+              };
+              private static final int[] COLORS = {0xFFE0103A, 0xFF8A0F35, 0xFF3A1FA8};
+
+              private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+              private final Shader[] shaders = new Shader[BLOBS.length];
+              private final Matrix m = new Matrix();
+              private final ValueAnimator anim = ValueAnimator.ofFloat(0f, (float) (2 * Math.PI));
+              private float t;
+
+              public AuroraView(Context c) {
+                  super(c);
+                  for (int i = 0; i < BLOBS.length; i++) {
+                      int col = COLORS[(int) BLOBS[i][3]];
+                      shaders[i] = new RadialGradient(0, 0, 1000f,
+                              new int[]{(col & 0x00FFFFFF) | 0x8C000000, (col & 0x00FFFFFF) | 0x33000000, col & 0x00FFFFFF},
+                              new float[]{0f, 0.5f, 1f}, Shader.TileMode.CLAMP);
+                  }
+                  anim.setDuration(26000);
+                  anim.setRepeatCount(ValueAnimator.INFINITE);
+                  anim.setInterpolator(new LinearInterpolator());
+                  anim.addUpdateListener(a -> { t = (float) a.getAnimatedValue(); invalidate(); });
+              }
+
+              @Override protected void onAttachedToWindow() { super.onAttachedToWindow(); anim.start(); }
+              @Override protected void onDetachedFromWindow() { anim.cancel(); super.onDetachedFromWindow(); }
+
+              @Override
+              protected void onDraw(Canvas c) {
+                  c.drawColor(0xFF07070B);
+                  float w = getWidth(), h = getHeight(), big = Math.max(w, h);
+                  for (int i = 0; i < BLOBS.length; i++) {
+                      float[] b = BLOBS[i];
+                      float x = w * (b[0] + 0.14f * (float) Math.sin(t * b[4] + b[5]));
+                      float y = h * (b[1] + 0.09f * (float) Math.cos(t * b[4] + b[5]));
+                      float rad = big * b[2] * 0.62f;
+                      m.setScale(rad / 1000f, rad / 1000f);
+                      m.postTranslate(x, y);
+                      shaders[i].setLocalMatrix(m);
+                      p.setShader(shaders[i]);
+                      c.drawCircle(x, y, rad, p);
+                  }
+              }
+          }
+          PINSKIN_EOF
+          mkdir -p 'app/src/main/java/com/pinskin/lsp'
+          cat > 'app/src/main/java/com/pinskin/lsp/Cfg.java' <<'PINSKIN_EOF'
+          package com.pinskin.lsp;
+
+          import android.content.Context;
+          import android.content.SharedPreferences;
+          import android.os.Bundle;
+
+          /** Настройки модуля. Без зависимостей от Xposed: используется и приложением, и хуком. */
+          public final class Cfg {
+              public static final String MODULE_PKG = "com.pinskin.lsp";
+              public static final String PREFS = "pinskin_prefs";
+
+              public static final String K_ENABLED = "enabled";
+              public static final String K_SHAPE = "shape";          // 0 круг, 1 скруглённый, 2 квадрат
+              public static final String K_BG = "bgColor";           // ARGB
+              public static final String K_TEXT = "textColor";       // ARGB
+              public static final String K_TEXT_SCALE = "textScale"; // 50..200 %
+              public static final String K_OPACITY = "opacity";      // 10..100 %
+              public static final String K_SX = "stretchX";          // 50..200 %
+              public static final String K_SY = "stretchY";          // 50..200 %
+              public static final String K_SMALL = "small";
+              public static final String K_NOCLIP = "noClip";
+              public static final String K_HIDE = "hideLetters";
+              public static final String K_USE_IMG = "useImage";
+              public static final String K_IMG = "imageB64";
+
+              public boolean enabled, small, noClip, hideLetters, useImage;
+              public int shape, bgColor, textColor, textScale, opacity, stretchX, stretchY;
+              public String imageB64;
+
+              interface Source {
+                  boolean b(String k, boolean d);
+                  int i(String k, int d);
+                  String s(String k, String d);
+              }
+
+              public static Cfg from(final SharedPreferences sp) {
+                  return from(new Source() {
+                      public boolean b(String k, boolean d) { return sp.getBoolean(k, d); }
+                      public int i(String k, int d) { return sp.getInt(k, d); }
+                      public String s(String k, String d) { return sp.getString(k, d); }
+                  });
+              }
+
+              public static Cfg from(final Bundle bd) {
+                  return from(new Source() {
+                      public boolean b(String k, boolean d) { return bd.getBoolean(k, d); }
+                      public int i(String k, int d) { return bd.getInt(k, d); }
+                      public String s(String k, String d) { String v = bd.getString(k); return v == null ? d : v; }
+                  });
+              }
+
+              private static Cfg from(Source sp) {
+                  Cfg c = new Cfg();
+                  c.enabled = sp.b(K_ENABLED, true);
+                  c.shape = sp.i(K_SHAPE, 0);
+                  c.bgColor = sp.i(K_BG, 0xFF3A3A3C);
+                  c.textColor = sp.i(K_TEXT, 0xFFFFFFFF);
+                  c.textScale = sp.i(K_TEXT_SCALE, 100);
+                  c.opacity = sp.i(K_OPACITY, 100);
+                  c.stretchX = sp.i(K_SX, 100);
+                  c.stretchY = sp.i(K_SY, 100);
+                  c.small = sp.b(K_SMALL, false);
+                  c.noClip = sp.b(K_NOCLIP, false);
+                  c.hideLetters = sp.b(K_HIDE, false);
+                  c.useImage = sp.b(K_USE_IMG, false);
+                  c.imageB64 = sp.s(K_IMG, "");
+                  return c;
+              }
+
+              /** Настройки в device-protected хранилище: доступны и до первой разблокировки после загрузки. */
+              public static SharedPreferences open(Context ctx) {
+                  return ctx.createDeviceProtectedStorageContext().getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+              }
+
+              public static SharedPreferences diag(Context ctx) {
+                  return ctx.createDeviceProtectedStorageContext().getSharedPreferences("pinskin_diag", Context.MODE_PRIVATE);
+              }
+          }
+          PINSKIN_EOF
+          mkdir -p 'app/src/main/java/com/pinskin/lsp'
+          cat > 'app/src/main/java/com/pinskin/lsp/ConfigProvider.java' <<'PINSKIN_EOF'
+          package com.pinskin.lsp;
+
+          import android.content.ContentProvider;
+          import android.content.ContentValues;
+          import android.content.Context;
+          import android.content.SharedPreferences;
+          import android.database.Cursor;
+          import android.net.Uri;
+          import android.os.Bundle;
+
+          import java.util.Map;
+
+          /** SystemUI обращается сюда через ContentResolver.call(): отдаём настройки и пишем диагностику. */
+          public class ConfigProvider extends ContentProvider {
+              @Override public boolean onCreate() { return true; }
+
+              @Override
+              public Bundle call(String method, String arg, Bundle extras) {
+                  Context ctx = getContext();
+                  if (ctx == null || method == null) return null;
+                  Bundle out = new Bundle();
+                  SharedPreferences diag = Cfg.diag(ctx);
+                  if (method.equals("cfg")) {
+                      for (Map.Entry<String, ?> e : Cfg.open(ctx).getAll().entrySet()) {
+                          Object v = e.getValue();
+                          if (v instanceof Boolean) out.putBoolean(e.getKey(), (Boolean) v);
+                          else if (v instanceof Integer) out.putInt(e.getKey(), (Integer) v);
+                          else if (v instanceof String) out.putString(e.getKey(), (String) v);
+                      }
+                      diag.edit().putLong("lastHit", System.currentTimeMillis())
+                              .putInt("hits", diag.getInt("hits", 0) + 1).apply();
+                  } else if (method.equals("load")) {
+                      diag.edit().putString("status", arg == null ? "" : arg)
+                              .putLong("loadTime", System.currentTimeMillis()).apply();
+                  }
+                  return out;
+              }
+
+              @Override public Cursor query(Uri u, String[] p, String s, String[] a, String o) { return null; }
+              @Override public String getType(Uri u) { return null; }
+              @Override public Uri insert(Uri u, ContentValues v) { return null; }
+              @Override public int delete(Uri u, String s, String[] a) { return 0; }
+              @Override public int update(Uri u, ContentValues v, String s, String[] a) { return 0; }
+          }
+          PINSKIN_EOF
+          mkdir -p 'app/src/main/java/com/pinskin/lsp'
+          cat > 'app/src/main/java/com/pinskin/lsp/GlassDrawable.java' <<'PINSKIN_EOF'
+          package com.pinskin.lsp;
+
+          import android.graphics.Canvas;
+          import android.graphics.ColorFilter;
+          import android.graphics.LinearGradient;
+          import android.graphics.Paint;
+          import android.graphics.PixelFormat;
+          import android.graphics.Rect;
+          import android.graphics.RectF;
+          import android.graphics.Shader;
+          import android.graphics.drawable.Drawable;
+
+          /** Фон «жидкого стекла»: полупрозрачная заливка, верхний блик и градиентная кромка. */
+          public final class GlassDrawable extends Drawable {
+              private final Paint tintP = new Paint(Paint.ANTI_ALIAS_FLAG);
+              private final Paint fillP = new Paint(Paint.ANTI_ALIAS_FLAG);
+              private final Paint glossP = new Paint(Paint.ANTI_ALIAS_FLAG);
+              private final Paint edgeP = new Paint(Paint.ANTI_ALIAS_FLAG);
+              private final RectF r = new RectF();
+              private final float radius;
+              private final float stroke;
+
+              /** tint: ARGB-подкраска под стеклом (0 = нет). */
+              public GlassDrawable(float radiusPx, float strokePx, int tint) {
+                  radius = radiusPx;
+                  stroke = strokePx;
+                  tintP.setColor(tint);
+                  edgeP.setStyle(Paint.Style.STROKE);
+                  edgeP.setStrokeWidth(strokePx);
+              }
+
+              @Override
+              protected void onBoundsChange(Rect b) {
+                  r.set(b);
+                  r.inset(stroke / 2f, stroke / 2f);
+                  fillP.setShader(new LinearGradient(b.left, b.top, b.right, b.bottom,
+                          new int[]{0x2EFFFFFF, 0x0DFFFFFF, 0x1AFFFFFF}, new float[]{0f, 0.55f, 1f},
+                          Shader.TileMode.CLAMP));
+                  glossP.setShader(new LinearGradient(0, b.top, 0, b.top + b.height() * 0.55f,
+                          0x33FFFFFF, 0x00FFFFFF, Shader.TileMode.CLAMP));
+                  edgeP.setShader(new LinearGradient(b.left, b.top, b.right, b.bottom,
+                          new int[]{0xB8FFFFFF, 0x1FFFFFFF, 0x00FFFFFF, 0x66FFFFFF}, new float[]{0f, 0.38f, 0.62f, 1f},
+                          Shader.TileMode.CLAMP));
+              }
+
+              @Override
+              public void draw(Canvas c) {
+                  if (r.isEmpty()) return;
+                  if ((tintP.getColor() >>> 24) != 0) c.drawRoundRect(r, radius, radius, tintP);
+                  c.drawRoundRect(r, radius, radius, fillP);
+                  c.drawRoundRect(r, radius, radius, glossP);
+                  c.drawRoundRect(r, radius, radius, edgeP);
+              }
+
+              @Override public void setAlpha(int a) {
+                  fillP.setAlpha(a); glossP.setAlpha(a); edgeP.setAlpha(a); invalidateSelf();
+              }
+              @Override public void setColorFilter(ColorFilter f) {}
+              @Override public int getOpacity() { return PixelFormat.TRANSLUCENT; }
+          }
+          PINSKIN_EOF
+          mkdir -p 'app/src/main/java/com/pinskin/lsp'
+          cat > 'app/src/main/java/com/pinskin/lsp/Hook.java' <<'PINSKIN_EOF'
+          package com.pinskin.lsp;
+
+          import android.app.Application;
+          import android.content.Context;
+          import android.net.Uri;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.os.SystemClock;
+          import android.view.View;
+
+          import java.util.Enumeration;
+
+          import dalvik.system.DexFile;
+          import de.robv.android.xposed.IXposedHookLoadPackage;
+          import de.robv.android.xposed.XC_MethodHook;
+          import de.robv.android.xposed.XposedBridge;
+          import de.robv.android.xposed.XposedHelpers;
+          import de.robv.android.xposed.callbacks.XC_LoadPackage;
+
+          public class Hook implements IXposedHookLoadPackage {
+              private static final String TAG = "PinSkin: ";
+              private static final Uri URI = Uri.parse("content://com.pinskin.lsp.config/cfg");
+              // Имя класса кнопки цифры из AOSP. НЕ проверено на HiOS 13.5.0 (Tecno KJ6).
+              private static final String[] KEY_CLASSES = { "com.android.keyguard.NumPadKey" };
+
+              private static volatile Cfg cached;
+              private static volatile long cachedAt;
+
+              private static Cfg fetch(Context ctx) {
+                  long now = SystemClock.uptimeMillis();
+                  Cfg c = cached;
+                  if (c != null && now - cachedAt < 1000) return c;
+                  try {
+                      Bundle b = ctx.getContentResolver().call(URI, "cfg", null, null);
+                      if (b != null) { c = Cfg.from(b); cached = c; cachedAt = now; }
+                  } catch (Throwable t) {
+                      XposedBridge.log(TAG + "provider call failed: " + t);
+                  }
+                  return c;
+              }
+
+              @Override
+              public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpp) {
+                  if (!"com.android.systemui".equals(lpp.packageName)) return;
+
+                  final StringBuilder st = new StringBuilder();
+                  int hooked = 0;
+                  for (String name : KEY_CLASSES) {
+                      Class<?> cls = XposedHelpers.findClassIfExists(name, lpp.classLoader);
+                      if (cls == null) {
+                          XposedBridge.log(TAG + "class not found: " + name);
+                          st.append("класс НЕ найден: ").append(name).append("; ");
+                          continue;
+                      }
+                      XposedBridge.hookAllConstructors(cls, new XC_MethodHook() {
+                          @Override
+                          protected void afterHookedMethod(MethodHookParam param) {
+                              if (!(param.thisObject instanceof View)) return;
+                              final View v = (View) param.thisObject;
+                              v.post(new Runnable() {
+                                  @Override public void run() {
+                                      try {
+                                          Cfg c = fetch(v.getContext());
+                                          if (c != null) KeyStyler.apply(v, c);
+                                      } catch (Throwable t) {
+                                          XposedBridge.log(t);
+                                      }
+                                  }
+                              });
+                          }
+                      });
+                      hooked++;
+                      st.append("класс найден и перехвачен: ").append(name).append("; ");
+                      XposedBridge.log(TAG + "hooked constructors of " + name);
+                  }
+                  if (hooked == 0) st.append("похожие классы: ").append(candidates(lpp));
+
+                  final String status = st + " | " + Build.MANUFACTURER + " " + Build.MODEL
+                          + " | " + Build.DISPLAY + " | Android " + Build.VERSION.RELEASE;
+                  XposedHelpers.findAndHookMethod(Application.class, "onCreate", new XC_MethodHook() {
+                      @Override
+                      protected void afterHookedMethod(MethodHookParam param) {
+                          try {
+                              ((Context) param.thisObject).getContentResolver().call(URI, "load", status, null);
+                          } catch (Throwable t) {
+                              XposedBridge.log(TAG + "report failed: " + t);
+                          }
+                      }
+                  });
+              }
+
+              @SuppressWarnings("deprecation")
+              private String candidates(XC_LoadPackage.LoadPackageParam lpp) {
+                  StringBuilder sb = new StringBuilder();
+                  try {
+                      DexFile df = new DexFile(lpp.appInfo.sourceDir);
+                      Enumeration<String> e = df.entries();
+                      int n = 0;
+                      while (e.hasMoreElements() && n < 40) {
+                          String s = e.nextElement();
+                          String l = s.toLowerCase();
+                          if (l.contains("numpad") || l.contains("pinkey") || l.contains("keyguardpin")) {
+                              sb.append(s).append(", ");
+                              n++;
+                          }
+                      }
+                      df.close();
+                  } catch (Throwable t) {
+                      XposedBridge.log(t);
+                      sb.append("(не удалось просканировать)");
+                  }
+                  return sb.length() == 0 ? "ничего не найдено" : sb.toString();
+              }
+          }
+          PINSKIN_EOF
+          mkdir -p 'app/src/main/java/com/pinskin/lsp'
+          cat > 'app/src/main/java/com/pinskin/lsp/KeyStyler.java' <<'PINSKIN_EOF'
+          package com.pinskin.lsp;
+
+          import android.graphics.Bitmap;
+          import android.graphics.BitmapFactory;
+          import android.graphics.Outline;
+          import android.graphics.drawable.BitmapDrawable;
+          import android.graphics.drawable.GradientDrawable;
+          import android.util.Base64;
+          import android.util.TypedValue;
+          import android.view.View;
+          import android.view.ViewGroup;
+          import android.view.ViewOutlineProvider;
+          import android.widget.TextView;
+
+          import java.util.ArrayList;
+          import java.util.List;
+          import java.util.WeakHashMap;
+
+          /** Оформляет одну кнопку клавиатуры. Один и тот же код для превью и для SystemUI. */
+          public final class KeyStyler {
+              private static final WeakHashMap<TextView, Float> ORIG_SIZE = new WeakHashMap<>();
+              private static String cachedB64 = "";
+              private static Bitmap cachedBmp;
+
+              private KeyStyler() {}
+
+              private static synchronized Bitmap bitmap(String b64) {
+                  if (b64 == null || b64.isEmpty()) return null;
+                  if (b64.equals(cachedB64)) return cachedBmp;
+                  try {
+                      byte[] raw = Base64.decode(b64, Base64.NO_WRAP);
+                      cachedBmp = BitmapFactory.decodeByteArray(raw, 0, raw.length);
+                  } catch (Throwable t) {
+                      cachedBmp = null;
+                  }
+                  cachedB64 = b64;
+                  return cachedBmp;
+              }
+
+              private static void collect(View v, List<TextView> out) {
+                  if (v instanceof TextView) {
+                      out.add((TextView) v);
+                  } else if (v instanceof ViewGroup) {
+                      ViewGroup g = (ViewGroup) v;
+                      for (int i = 0; i < g.getChildCount(); i++) collect(g.getChildAt(i), out);
+                  }
+              }
+
+              public static void apply(View key, Cfg c) {
+                  if (!c.enabled) return;
+                  float density = key.getResources().getDisplayMetrics().density;
+
+                  List<TextView> tvs = new ArrayList<>();
+                  collect(key, tvs);
+                  TextView digit = null, letters = null;
+                  for (TextView tv : tvs) {
+                      CharSequence t = tv.getText();
+                      if (digit == null && t != null && t.length() == 1 && Character.isDigit(t.charAt(0))) digit = tv;
+                      else if (letters == null) letters = tv;
+                  }
+                  if (digit == null && !tvs.isEmpty()) {
+                      digit = tvs.get(0);
+                      letters = tvs.size() > 1 ? tvs.get(1) : null;
+                  }
+
+                  // Фон кнопки
+                  final int shape = c.shape;
+                  Bitmap bmp = c.useImage ? bitmap(c.imageB64) : null;
+                  if (bmp != null) {
+                      key.setBackground(new BitmapDrawable(key.getResources(), bmp));
+                      key.setOutlineProvider(new ViewOutlineProvider() {
+                          @Override public void getOutline(View v, Outline o) {
+                              int w = v.getWidth(), h = v.getHeight();
+                              if (shape == 2) o.setRect(0, 0, w, h);
+                              else o.setRoundRect(0, 0, w, h, Math.min(w, h) / (shape == 0 ? 2f : 4f));
+                          }
+                      });
+                      key.setClipToOutline(true);
+                  } else {
+                      GradientDrawable g = new GradientDrawable();
+                      g.setColor(c.bgColor);
+                      if (shape == 0) g.setShape(GradientDrawable.OVAL);
+                      else {
+                          g.setShape(GradientDrawable.RECTANGLE);
+                          g.setCornerRadius(shape == 1 ? 18 * density : 0f);
+                      }
+                      key.setBackground(g);
+                      key.setClipToOutline(false);
+                  }
+
+                  // Текст
+                  if (digit != null) {
+                      digit.setTextColor(c.textColor);
+                      Float orig = ORIG_SIZE.get(digit);
+                      if (orig == null) { orig = digit.getTextSize(); ORIG_SIZE.put(digit, orig); }
+                      digit.setTextSize(TypedValue.COMPLEX_UNIT_PX, orig * c.textScale / 100f);
+                  }
+                  if (letters != null) {
+                      if (c.hideLetters) letters.setVisibility(View.GONE);
+                      else letters.setTextColor(c.textColor);
+                  }
+
+                  // Размер, прозрачность, обрезка
+                  float small = c.small ? 0.8f : 1f;
+                  key.setScaleX(c.stretchX / 100f * small);
+                  key.setScaleY(c.stretchY / 100f * small);
+                  key.setAlpha(c.opacity / 100f);
+                  if (c.noClip) {
+                      View cur = key;
+                      for (int i = 0; i < 4 && cur.getParent() instanceof ViewGroup; i++) {
+                          ViewGroup p = (ViewGroup) cur.getParent();
+                          p.setClipChildren(false);
+                          p.setClipToPadding(false);
+                          cur = p;
+                      }
+                  }
+              }
+          }
+          PINSKIN_EOF
+          mkdir -p 'app/src/main/java/com/pinskin/lsp'
+          cat > 'app/src/main/java/com/pinskin/lsp/MainActivity.java' <<'PINSKIN_EOF'
+          package com.pinskin.lsp;
+
+          import android.app.Activity;
+          import android.app.AlertDialog;
+          import android.content.Intent;
+          import android.content.SharedPreferences;
+          import android.content.res.ColorStateList;
+          import android.graphics.Bitmap;
+          import android.graphics.BitmapFactory;
+          import android.graphics.Color;
+          import android.graphics.Outline;
+          import android.graphics.Typeface;
+          import android.graphics.drawable.ColorDrawable;
+          import android.graphics.drawable.GradientDrawable;
+          import android.media.ThumbnailUtils;
+          import android.net.Uri;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.util.Base64;
+          import android.view.Gravity;
+          import android.view.MotionEvent;
+          import android.view.View;
+          import android.view.ViewGroup;
+          import android.view.ViewOutlineProvider;
+          import android.view.Window;
+          import android.view.animation.DecelerateInterpolator;
+          import android.view.animation.OvershootInterpolator;
+          import android.widget.EditText;
+          import android.widget.FrameLayout;
+          import android.widget.GridLayout;
+          import android.widget.ImageView;
+          import android.widget.LinearLayout;
+          import android.widget.ScrollView;
+          import android.widget.SeekBar;
+          import android.widget.Switch;
+          import android.widget.TextView;
+          import android.widget.Toast;
+
+          import java.io.ByteArrayOutputStream;
+          import java.io.InputStream;
+          import java.util.ArrayList;
+          import java.util.List;
+
+          @SuppressWarnings("deprecation")
+          public class MainActivity extends Activity {
+              private static final int REQ_IMG = 11;
+              private static final int ACCENT = 0xFFFF3B5C;
+              private static final int TEXT1 = 0xFFF5F5F7;
+              private static final int TEXT2 = 0x99FFFFFF;
+              private static final String[] LETTERS = {"", "ABC", "DEF", "GHI", "JKL", "MNO", "PQRS", "TUV", "WXYZ"};
+
+              private SharedPreferences sp;
+              private final List<View> keys = new ArrayList<>();
+              private ViewGroup cur;                 // куда helper-ы добавляют элементы
+              private LinearLayout page;             // текущая страница (колонка)
+              private TextView diagView;
+              private TextView[] shapeChips;
+              private final View[] pages = new View[2];
+              private final LinearLayout[] cols = new LinearLayout[2];
+              private final TextView[] tabLabels = new TextView[2];
+              private View indicator;
+              private FrameLayout tabBar;
+              private int selected = 0, topInset = 0, bottomInset = 0;
+
+              private int dp(int v) { return Math.round(v * getResources().getDisplayMetrics().density); }
+              private float dpf(float v) { return v * getResources().getDisplayMetrics().density; }
+
+              // ====================================================================== lifecycle
+              @Override
+              protected void onCreate(Bundle b) {
+                  super.onCreate(b);
+                  sp = Cfg.open(this);
+                  Cfg c = Cfg.from(sp);
+                  selected = b != null ? b.getInt("tab", 0) : 0;
+                  setupWindow();
+
+                  FrameLayout frame = new FrameLayout(this);
+                  frame.addView(new AuroraView(this), new FrameLayout.LayoutParams(-1, -1));
+                  for (int i = 0; i < 2; i++) {
+                      ScrollView sv = new ScrollView(this);
+                      sv.setVerticalScrollBarEnabled(false);
+                      sv.setOverScrollMode(View.OVER_SCROLL_NEVER);
+                      LinearLayout col = new LinearLayout(this);
+                      col.setOrientation(LinearLayout.VERTICAL);
+                      sv.addView(col, new FrameLayout.LayoutParams(-1, -2));
+                      cols[i] = col;
+                      pages[i] = sv;
+                      frame.addView(sv, new FrameLayout.LayoutParams(-1, -1));
+                  }
+                  buildMisc(c);
+                  buildCredits();
+                  buildTabBar(frame);
+                  setContentView(frame);
+
+                  pages[1 - selected].setVisibility(View.GONE);
+                  indicator.setTranslationX(selected * dp(116));
+                  updateTabColors();
+                  applyInsets();
+                  frame.setOnApplyWindowInsetsListener((v, in) -> {
+                      topInset = in.getSystemWindowInsetTop();
+                      bottomInset = in.getSystemWindowInsetBottom();
+                      applyInsets();
+                      return in;
+                  });
+                  frame.requestApplyInsets();
+                  playEntrance(cols[selected]);
+                  refresh();
+              }
+
+              @Override
+              protected void onSaveInstanceState(Bundle out) {
+                  super.onSaveInstanceState(out);
+                  out.putInt("tab", selected);
+              }
+
+              @Override
+              protected void onResume() {
+                  super.onResume();
+                  updateDiag();
+              }
+
+              private void setupWindow() {
+                  Window w = getWindow();
+                  w.setBackgroundDrawable(new ColorDrawable(0xFF07070B));
+                  w.setStatusBarColor(Color.TRANSPARENT);
+                  w.setNavigationBarColor(Color.TRANSPARENT);
+                  if (Build.VERSION.SDK_INT >= 30) {
+                      w.setDecorFitsSystemWindows(false);
+                  } else {
+                      w.getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                              | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION);
+                  }
+                  if (Build.VERSION.SDK_INT >= 29) w.setNavigationBarContrastEnforced(false);
+              }
+
+              private void applyInsets() {
+                  for (LinearLayout col : cols) col.setPadding(dp(16), topInset + dp(18), dp(16), bottomInset + dp(120));
+                  FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) tabBar.getLayoutParams();
+                  lp.bottomMargin = bottomInset + dp(18);
+                  tabBar.setLayoutParams(lp);
+              }
+
+              // ====================================================================== pages
+              private void buildMisc(Cfg c) {
+                  page = cols[0];
+                  cur = cols[0];
+
+                  LinearLayout head = new LinearLayout(this);
+                  head.setGravity(Gravity.CENTER_VERTICAL);
+                  head.setPadding(dp(4), 0, dp(4), dp(18));
+                  head.addView(iconView(dp(52)), new LinearLayout.LayoutParams(dp(52), dp(52)));
+                  LinearLayout tc = new LinearLayout(this);
+                  tc.setOrientation(LinearLayout.VERTICAL);
+                  tc.setPadding(dp(14), 0, 0, 0);
+                  TextView t1 = tv("Blood Knife", 26, TEXT1, true);
+                  TextView t2 = tv("Кастомизация клавиатуры пароля", 13, TEXT2, false);
+                  tc.addView(t1);
+                  tc.addView(t2);
+                  head.addView(tc);
+                  cols[0].addView(head);
+
+                  card(null);
+                  sw("Включить оформление", Cfg.K_ENABLED, c.enabled);
+
+                  card("Диагностика");
+                  diagView = tv("", 13, TEXT2, false);
+                  diagView.setLineSpacing(0, 1.15f);
+                  cur.addView(diagView);
+                  gbtn("Обновить диагностику", 0, v -> updateDiag());
+
+                  card("Интерактивное превью");
+                  buildPreview();
+
+                  card("Форма и цвет");
+                  shapeChips(c.shape);
+                  colorRow("Цвет кнопок", Cfg.K_BG, c.bgColor);
+                  colorRow("Цвет цифр", Cfg.K_TEXT, c.textColor);
+
+                  card("Размер и прозрачность");
+                  seek("Прозрачность", Cfg.K_OPACITY, 10, 100, c.opacity);
+                  seek("Растягивание по X", Cfg.K_SX, 50, 200, c.stretchX);
+                  seek("Растягивание по Y", Cfg.K_SY, 50, 200, c.stretchY);
+                  seek("Размер цифр", Cfg.K_TEXT_SCALE, 50, 200, c.textScale);
+                  sw("Формат small (кнопки меньше на 20%)", Cfg.K_SMALL, c.small);
+                  sw("Выключить обрезку (кнопки могут выходить за рамку)", Cfg.K_NOCLIP, c.noClip);
+                  sw("Скрыть буквы под цифрами", Cfg.K_HIDE, c.hideLetters);
+
+                  card("Своя картинка на кнопках");
+                  sw("Использовать картинку вместо цвета", Cfg.K_USE_IMG, c.useImage);
+                  gbtn("Выбрать картинку из галереи", 0x55E5173F, v -> {
+                      Intent i = new Intent(Intent.ACTION_GET_CONTENT);
+                      i.setType("image/*");
+                      startActivityForResult(i, REQ_IMG);
+                  });
+                  gbtn("Убрать картинку", 0, v -> {
+                      sp.edit().remove(Cfg.K_IMG).putBoolean(Cfg.K_USE_IMG, false).apply();
+                      recreate();
+                  });
+
+                  card("Готовые стили");
+                  presetRow();
+
+                  card("Действия");
+                  gbtn("Перезапустить SystemUI (нужен root)", 0x55E5173F, v -> restartSystemUi());
+                  gbtn("Сбросить всё", 0, v -> { sp.edit().clear().apply(); recreate(); });
+
+                  card("Как включить");
+                  TextView how = tv("1) LSPosed → Модули → Blood Knife → включить.\n"
+                          + "2) Область действия: отметить «Интерфейс системы» (com.android.systemui).\n"
+                          + "3) Нажать «Перезапустить SystemUI» (или перезагрузить телефон).\n"
+                          + "4) Заблокировать экран и открыть ввод PIN/пароля. После этого изменения "
+                          + "настроек видны сразу при следующем открытии клавиатуры.", 13, TEXT2, false);
+                  how.setLineSpacing(0, 1.2f);
+                  cur.addView(how);
+              }
+
+              private void buildCredits() {
+                  page = cols[1];
+                  cur = cols[1];
+                  cols[1].setGravity(Gravity.CENTER_HORIZONTAL);
+                  cols[1].addView(new View(this), new LinearLayout.LayoutParams(1, dp(36)));
+                  LinearLayout.LayoutParams ilp = new LinearLayout.LayoutParams(dp(112), dp(112));
+                  ilp.gravity = Gravity.CENTER_HORIZONTAL;
+                  cols[1].addView(iconView(dp(112)), ilp);
+
+                  TextView t = tv("Blood Knife", 30, TEXT1, true);
+                  t.setGravity(Gravity.CENTER);
+                  t.setPadding(0, dp(18), 0, 0);
+                  cols[1].addView(t, new LinearLayout.LayoutParams(-1, -2));
+
+                  String ver = "";
+                  try { ver = " · v" + getPackageManager().getPackageInfo(getPackageName(), 0).versionName; }
+                  catch (Exception ignored) {}
+                  TextView s = tv("LSPosed-модуль" + ver, 13, TEXT2, false);
+                  s.setGravity(Gravity.CENTER);
+                  s.setPadding(0, dp(4), 0, dp(26));
+                  cols[1].addView(s, new LinearLayout.LayoutParams(-1, -2));
+
+                  card(null);
+                  TextView by = tv("by: @dcpcall (tg)", 20, TEXT1, true);
+                  by.setGravity(Gravity.CENTER);
+                  by.setPadding(0, dp(10), 0, dp(10));
+                  cur.addView(by, new LinearLayout.LayoutParams(-1, -2));
+              }
+
+              private void buildTabBar(FrameLayout frame) {
+                  tabBar = new FrameLayout(this);
+                  tabBar.setBackground(new GlassDrawable(dpf(34), dpf(1.2f), 0x8C090910));
+
+                  indicator = new View(this);
+                  indicator.setBackground(new GlassDrawable(dpf(28), dpf(1.2f), 0x73E5173F));
+                  FrameLayout.LayoutParams ilp = new FrameLayout.LayoutParams(dp(116), dp(54),
+                          Gravity.CENTER_VERTICAL | Gravity.START);
+                  ilp.leftMargin = dp(6);
+                  tabBar.addView(indicator, ilp);
+
+                  LinearLayout row = new LinearLayout(this);
+                  row.setPadding(dp(6), 0, dp(6), 0);
+                  String[] names = {"Misc", "Credits"};
+                  for (int i = 0; i < 2; i++) {
+                      final int idx = i;
+                      TextView t = tv(names[i], 15, TEXT2, true);
+                      t.setGravity(Gravity.CENTER);
+                      t.setOnClickListener(v -> select(idx));
+                      pressable(t);
+                      tabLabels[i] = t;
+                      row.addView(t, new LinearLayout.LayoutParams(dp(116), -1));
+                  }
+                  tabBar.addView(row, new FrameLayout.LayoutParams(-1, -1));
+                  frame.addView(tabBar, new FrameLayout.LayoutParams(dp(244), dp(66),
+                          Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL));
+              }
+
+              private void select(int idx) {
+                  if (idx == selected) return;
+                  final int old = selected;
+                  selected = idx;
+                  indicator.animate().translationX(idx * dp(116)).setDuration(420)
+                          .setInterpolator(new OvershootInterpolator(1.15f)).start();
+                  updateTabColors();
+
+                  final View out = pages[old];
+                  out.animate().cancel();
+                  out.animate().alpha(0f).setDuration(140).withEndAction(() -> {
+                      if (selected != old) out.setVisibility(View.GONE);
+                      out.setAlpha(1f);
+                  }).start();
+
+                  View in = pages[idx];
+                  in.animate().cancel();
+                  in.setAlpha(1f);
+                  in.setVisibility(View.VISIBLE);
+                  ((ScrollView) in).scrollTo(0, 0);
+                  playEntrance(cols[idx]);
+              }
+
+              private void updateTabColors() {
+                  for (int i = 0; i < 2; i++) tabLabels[i].setTextColor(i == selected ? 0xFFFFFFFF : TEXT2);
+              }
+
+              private void playEntrance(LinearLayout col) {
+                  for (int i = 0; i < col.getChildCount(); i++) {
+                      View ch = col.getChildAt(i);
+                      ch.setAlpha(0f);
+                      ch.setTranslationY(dp(22));
+                      ch.animate().alpha(1f).translationY(0f).setStartDelay(Math.min(i, 8) * 45L)
+                              .setDuration(380).setInterpolator(new DecelerateInterpolator(1.6f)).start();
+                  }
+              }
+
+              // ====================================================================== UI helpers
+              private TextView tv(String s, int sp_, int color, boolean bold) {
+                  TextView t = new TextView(this);
+                  t.setText(s);
+                  t.setTextSize(sp_);
+                  t.setTextColor(color);
+                  t.setTypeface(Typeface.create(bold ? "sans-serif-medium" : "sans-serif", Typeface.NORMAL));
+                  if (bold) t.getPaint().setFakeBoldText(false);
+                  return t;
+              }
+
+              private ImageView iconView(final int size) {
+                  ImageView v = new ImageView(this);
+                  v.setImageDrawable(getPackageManager().getApplicationIcon(getApplicationInfo()));
+                  v.setOutlineProvider(new ViewOutlineProvider() {
+                      @Override public void getOutline(View x, Outline o) {
+                          o.setRoundRect(0, 0, x.getWidth(), x.getHeight(), size * 0.28f);
+                      }
+                  });
+                  v.setClipToOutline(true);
+                  return v;
+              }
+
+              private void card(String title) {
+                  LinearLayout c = new LinearLayout(this);
+                  c.setOrientation(LinearLayout.VERTICAL);
+                  c.setPadding(dp(18), dp(16), dp(18), dp(16));
+                  c.setBackground(new GlassDrawable(dpf(26), dpf(1.2f), 0));
+                  LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
+                  lp.bottomMargin = dp(14);
+                  page.addView(c, lp);
+                  if (title != null) {
+                      TextView t = tv(title, 15, ACCENT, true);
+                      t.setPadding(0, 0, 0, dp(6));
+                      c.addView(t);
+                  }
+                  cur = c;
+              }
+
+              private void pressable(View v) {
+                  v.setOnTouchListener((view, e) -> {
+                      int a = e.getActionMasked();
+                      if (a == MotionEvent.ACTION_DOWN) {
+                          view.animate().scaleX(0.95f).scaleY(0.95f).setDuration(110).start();
+                      } else if (a == MotionEvent.ACTION_UP || a == MotionEvent.ACTION_CANCEL) {
+                          view.animate().scaleX(1f).scaleY(1f).setDuration(280)
+                                  .setInterpolator(new OvershootInterpolator(2.4f)).start();
+                      }
+                      return false;
+                  });
+              }
+
+              private TextView gbtn(String text, int tint, View.OnClickListener l) {
+                  TextView t = tv(text, 14, TEXT1, true);
+                  t.setGravity(Gravity.CENTER);
+                  t.setPadding(dp(16), dp(14), dp(16), dp(14));
+                  t.setBackground(new GlassDrawable(dpf(20), dpf(1.2f), tint));
+                  t.setOnClickListener(l);
+                  pressable(t);
+                  LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
+                  lp.topMargin = dp(10);
+                  cur.addView(t, lp);
+                  return t;
+              }
+
+              private void sw(String label, final String key, boolean val) {
+                  LinearLayout row = new LinearLayout(this);
+                  row.setGravity(Gravity.CENTER_VERTICAL);
+                  row.setPadding(0, dp(8), 0, dp(8));
+                  TextView l = tv(label, 15, TEXT1, false);
+                  row.addView(l, new LinearLayout.LayoutParams(0, -2, 1f));
+                  Switch s = new Switch(this);
+                  int[][] st = {{android.R.attr.state_checked}, {}};
+                  s.setThumbTintList(new ColorStateList(st, new int[]{0xFFFFFFFF, 0xFFE0E0E0}));
+                  s.setTrackTintList(new ColorStateList(st, new int[]{0xFFE5173F, 0x55FFFFFF}));
+                  s.setChecked(val);
+                  s.setOnCheckedChangeListener((cb, on) -> {
+                      sp.edit().putBoolean(key, on).apply();
+                      refresh();
+                  });
+                  LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(-2, -2);
+                  slp.leftMargin = dp(12);
+                  row.addView(s, slp);
+                  cur.addView(row);
+              }
+
+              private void seek(final String label, final String key, final int min, final int max, int val) {
+                  LinearLayout top = new LinearLayout(this);
+                  top.setPadding(0, dp(12), 0, 0);
+                  top.addView(tv(label, 14, TEXT1, false), new LinearLayout.LayoutParams(0, -2, 1f));
+                  final TextView v = tv(val + "%", 14, ACCENT, true);
+                  top.addView(v);
+                  cur.addView(top);
+
+                  SeekBar s = new SeekBar(this);
+                  s.setMax(max - min);
+                  s.setProgress(val - min);
+                  s.setProgressTintList(ColorStateList.valueOf(ACCENT));
+                  s.setThumbTintList(ColorStateList.valueOf(0xFFFFFFFF));
+                  s.setProgressBackgroundTintList(ColorStateList.valueOf(0x40FFFFFF));
+                  s.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+                      @Override public void onProgressChanged(SeekBar sb, int pr, boolean user) {
+                          int x = pr + min;
+                          v.setText(x + "%");
+                          if (user) { sp.edit().putInt(key, x).apply(); refresh(); }
+                      }
+                      @Override public void onStartTrackingTouch(SeekBar sb) {}
+                      @Override public void onStopTrackingTouch(SeekBar sb) {}
+                  });
+                  cur.addView(s);
+              }
+
+              private static String hex(int c) { return String.format("#%08X", c); }
+
+              private GradientDrawable swatch(int color) {
+                  GradientDrawable g = new GradientDrawable();
+                  g.setShape(GradientDrawable.OVAL);
+                  g.setColor(color);
+                  g.setStroke(dp(2), 0x80FFFFFF);
+                  return g;
+              }
+
+              private void colorRow(final String label, final String key, final int def) {
+                  LinearLayout row = new LinearLayout(this);
+                  row.setGravity(Gravity.CENTER_VERTICAL);
+                  row.setPadding(dp(14), dp(12), dp(14), dp(12));
+                  row.setBackground(new GlassDrawable(dpf(18), dpf(1f), 0));
+                  LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(-1, -2);
+                  rlp.topMargin = dp(10);
+
+                  LinearLayout txt = new LinearLayout(this);
+                  txt.setOrientation(LinearLayout.VERTICAL);
+                  txt.addView(tv(label, 15, TEXT1, false));
+                  final TextView hx = tv(hex(sp.getInt(key, def)), 12, TEXT2, false);
+                  txt.addView(hx);
+                  row.addView(txt, new LinearLayout.LayoutParams(0, -2, 1f));
+
+                  final View sw = new View(this);
+                  sw.setBackground(swatch(sp.getInt(key, def)));
+                  row.addView(sw, new LinearLayout.LayoutParams(dp(30), dp(30)));
+
+                  row.setOnClickListener(v -> {
+                      final EditText et = new EditText(this);
+                      et.setText(hex(sp.getInt(key, def)));
+                      new AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
+                              .setTitle(label + " (#RRGGBB или #AARRGGBB)")
+                              .setView(et)
+                              .setPositiveButton("OK", (d, w) -> {
+                                  try {
+                                      int col = Color.parseColor(et.getText().toString().trim());
+                                      sp.edit().putInt(key, col).apply();
+                                      hx.setText(hex(col));
+                                      sw.setBackground(swatch(col));
+                                      refresh();
+                                  } catch (IllegalArgumentException e) {
+                                      Toast.makeText(this, "Неверный цвет", Toast.LENGTH_SHORT).show();
+                                  }
+                              })
+                              .setNegativeButton("Отмена", null)
+                              .show();
+                  });
+                  pressable(row);
+                  cur.addView(row, rlp);
+              }
+
+              private void shapeChips(int selectedShape) {
+                  String[] names = {"Круг", "Скруглённый", "Квадрат"};
+                  shapeChips = new TextView[3];
+                  LinearLayout row = new LinearLayout(this);
+                  for (int i = 0; i < 3; i++) {
+                      final int idx = i;
+                      TextView t = tv(names[i], 13, TEXT1, true);
+                      t.setGravity(Gravity.CENTER);
+                      t.setPadding(dp(4), dp(12), dp(4), dp(12));
+                      t.setOnClickListener(v -> {
+                          sp.edit().putInt(Cfg.K_SHAPE, idx).apply();
+                          styleChips(idx);
+                          refresh();
+                      });
+                      pressable(t);
+                      shapeChips[i] = t;
+                      LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, -2, 1f);
+                      lp.setMargins(dp(3), 0, dp(3), 0);
+                      row.addView(t, lp);
+                  }
+                  styleChips(selectedShape);
+                  cur.addView(row);
+              }
+
+              private void styleChips(int sel) {
+                  for (int i = 0; i < shapeChips.length; i++) {
+                      shapeChips[i].setBackground(new GlassDrawable(dpf(16), dpf(1f), i == sel ? 0x80E5173F : 0));
+                      shapeChips[i].setTextColor(i == sel ? 0xFFFFFFFF : TEXT2);
+                  }
+              }
+
+              private void presetRow() {
+                  // shape, bg, text, opacity, stretchX, stretchY, small
+                  final Object[][] presets = {
+                          {"Классика", 0, 0xFF3A3A3C, 0xFFFFFFFF, 100, 100, 100, false},
+                          {"Неон", 0, 0xFF1A0B3A, 0xFF00FFC8, 100, 100, 100, false},
+                          {"Стекло", 0, 0x55FFFFFF, 0xFFFFFFFF, 90, 100, 100, false},
+                          {"Квадраты", 2, 0xFF222222, 0xFFFFD60A, 100, 100, 100, true},
+                  };
+                  LinearLayout row = new LinearLayout(this);
+                  row.setPadding(0, dp(4), 0, 0);
+                  for (final Object[] p : presets) {
+                      TextView bt = tv((String) p[0], 12, TEXT1, true);
+                      bt.setGravity(Gravity.CENTER);
+                      bt.setSingleLine(true);
+                      bt.setPadding(dp(2), dp(13), dp(2), dp(13));
+                      bt.setBackground(new GlassDrawable(dpf(16), dpf(1f), 0));
+                      bt.setOnClickListener(v -> {
+                          sp.edit().putInt(Cfg.K_SHAPE, (Integer) p[1]).putInt(Cfg.K_BG, (Integer) p[2])
+                                  .putInt(Cfg.K_TEXT, (Integer) p[3]).putInt(Cfg.K_OPACITY, (Integer) p[4])
+                                  .putInt(Cfg.K_SX, (Integer) p[5]).putInt(Cfg.K_SY, (Integer) p[6])
+                                  .putBoolean(Cfg.K_SMALL, (Boolean) p[7]).apply();
+                          recreate();
+                      });
+                      pressable(bt);
+                      LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, -2, 1f);
+                      lp.setMargins(dp(3), 0, dp(3), 0);
+                      row.addView(bt, lp);
+                  }
+                  cur.addView(row);
+              }
+
+              // ====================================================================== diagnostics
+              private void updateDiag() {
+                  SharedPreferences d = Cfg.diag(this);
+                  java.text.DateFormat f = java.text.DateFormat.getTimeInstance();
+                  long lt = d.getLong("loadTime", 0), lh = d.getLong("lastHit", 0);
+                  StringBuilder s = new StringBuilder();
+                  if (lt == 0) {
+                      s.append("• SystemUI ещё не загружал модуль (проверь область действия в LSPosed и перезапусти SystemUI)\n");
+                  } else {
+                      s.append("• SystemUI загрузил модуль в ").append(f.format(new java.util.Date(lt))).append("\n");
+                      s.append("• ").append(d.getString("status", "")).append("\n");
+                  }
+                  if (lh == 0) {
+                      s.append("• Кнопки клавиатуры ещё ни разу не запрашивали стиль (открой ввод PIN на экране блокировки)");
+                  } else {
+                      s.append("• Стиль запрашивали ").append(d.getInt("hits", 0)).append(" раз, последний раз в ")
+                              .append(f.format(new java.util.Date(lh)));
+                  }
+                  diagView.setText(s);
+              }
+
+              // ====================================================================== Preview
+              private void buildPreview() {
+                  LinearLayout box = new LinearLayout(this);
+                  box.setBackground(new GlassDrawable(dpf(22), dpf(1f), 0x66000000));
+                  box.setGravity(Gravity.CENTER);
+                  box.setPadding(dp(8), dp(22), dp(8), dp(22));
+                  box.setClipChildren(false);
+                  box.setClipToPadding(false);
+
+                  GridLayout grid = new GridLayout(this);
+                  grid.setColumnCount(3);
+                  grid.setClipChildren(false);
+                  grid.setClipToPadding(false);
+                  int[] order = {1, 2, 3, 4, 5, 6, 7, 8, 9, -1, 0, -1};
+                  for (int d : order) {
+                      GridLayout.LayoutParams lp = new GridLayout.LayoutParams();
+                      lp.width = dp(72);
+                      lp.height = dp(72);
+                      lp.setMargins(dp(5), dp(5), dp(5), dp(5));
+                      if (d < 0) { grid.addView(new View(this), lp); continue; }
+
+                      FrameLayout key = new FrameLayout(this);
+                      LinearLayout inner = new LinearLayout(this);
+                      inner.setOrientation(LinearLayout.VERTICAL);
+                      inner.setGravity(Gravity.CENTER);
+                      TextView digit = new TextView(this);
+                      digit.setText(String.valueOf(d));
+                      digit.setTextSize(26);
+                      digit.setGravity(Gravity.CENTER);
+                      TextView letters = new TextView(this);
+                      letters.setText(d >= 1 ? LETTERS[d - 1 < LETTERS.length ? d - 1 : 0] : "");
+                      letters.setTextSize(9);
+                      letters.setGravity(Gravity.CENTER);
+                      inner.addView(digit);
+                      inner.addView(letters);
+                      key.addView(inner, new FrameLayout.LayoutParams(-1, -1, Gravity.CENTER));
+                      keys.add(key);
+                      grid.addView(key, lp);
+                  }
+                  box.addView(grid);
+                  LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(-1, -2);
+                  blp.topMargin = dp(6);
+                  cur.addView(box, blp);
+              }
+
+              private void refresh() {
+                  Cfg c = Cfg.from(sp);
+                  c.enabled = true; // в превью всегда показываем стиль
+                  for (View k : keys) KeyStyler.apply(k, c);
+              }
+
+              // ====================================================================== Image
+              @Override
+              protected void onActivityResult(int req, int res, Intent data) {
+                  super.onActivityResult(req, res, data);
+                  if (req != REQ_IMG || res != RESULT_OK || data == null || data.getData() == null) return;
+                  try {
+                      String b64 = encode(data.getData());
+                      sp.edit().putString(Cfg.K_IMG, b64).putBoolean(Cfg.K_USE_IMG, true).apply();
+                      recreate();
+                  } catch (Exception e) {
+                      Toast.makeText(this, "Не удалось прочитать картинку", Toast.LENGTH_LONG).show();
+                  }
+              }
+
+              private String encode(Uri u) throws Exception {
+                  BitmapFactory.Options o = new BitmapFactory.Options();
+                  o.inJustDecodeBounds = true;
+                  try (InputStream in = getContentResolver().openInputStream(u)) {
+                      BitmapFactory.decodeStream(in, null, o);
+                  }
+                  int big = Math.max(o.outWidth, o.outHeight), s = 1;
+                  while (big / s > 512) s *= 2;
+                  o = new BitmapFactory.Options();
+                  o.inSampleSize = s;
+                  Bitmap bmp;
+                  try (InputStream in = getContentResolver().openInputStream(u)) {
+                      bmp = BitmapFactory.decodeStream(in, null, o);
+                  }
+                  if (bmp == null) throw new Exception("decode failed");
+                  Bitmap sq = ThumbnailUtils.extractThumbnail(bmp, 192, 192);
+                  ByteArrayOutputStream bo = new ByteArrayOutputStream();
+                  sq.compress(bmp.hasAlpha() ? Bitmap.CompressFormat.PNG : Bitmap.CompressFormat.JPEG, 90, bo);
+                  return Base64.encodeToString(bo.toByteArray(), Base64.NO_WRAP);
+              }
+
+              // ====================================================================== Restart SystemUI
+              private void restartSystemUi() {
+                  new Thread(() -> {
+                      String msg;
+                      try {
+                          Process p = new ProcessBuilder("su", "-c", "kill $(pidof com.android.systemui)").start();
+                          int code = p.waitFor();
+                          msg = code == 0 ? "SystemUI перезапускается" : "su вернул код " + code + ". Перезагрузи телефон.";
+                      } catch (Exception e) {
+                          msg = "Нет root-доступа. Перезагрузи телефон.";
+                      }
+                      final String m = msg;
+                      runOnUiThread(() -> Toast.makeText(this, m, Toast.LENGTH_LONG).show());
+                  }).start();
+              }
+          }
+          PINSKIN_EOF
+          mkdir -p 'app/src/main/res/drawable-nodpi'
+          base64 -d > 'app/src/main/res/drawable-nodpi/ic_fg.webp' <<'PINSKIN_EOF'
+          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
+          PINSKIN_EOF
+          mkdir -p 'app/src/main/res/drawable'
+          cat > 'app/src/main/res/drawable/ic_bg.xml' <<'PINSKIN_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+              <gradient android:type="linear" android:angle="315"
+                  android:startColor="#2A0712" android:endColor="#0B0B10" />
+          </shape>
+          PINSKIN_EOF
+          mkdir -p 'app/src/main/res/mipmap-anydpi-v26'
+          cat > 'app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml' <<'PINSKIN_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+              <background android:drawable="@drawable/ic_bg" />
+              <foreground android:drawable="@drawable/ic_fg" />
+          </adaptive-icon>
+          PINSKIN_EOF
+          mkdir -p 'app/src/main/res/values'
+          cat > 'app/src/main/res/values/strings.xml' <<'PINSKIN_EOF'
+          <resources>
+              <string name="app_name">Blood Knife</string>
+              <string name="xposed_desc">Blood Knife: кастомизация клавиатуры PIN/пароля на экране блокировки (Tecno HiOS)</string>
+              <string-array name="xposed_scope">
+                  <item>com.android.systemui</item>
+              </string-array>
+          </resources>
+          PINSKIN_EOF
+          mkdir -p 'app/src/main/res/values'
+          cat > 'app/src/main/res/values/styles.xml' <<'PINSKIN_EOF'
+          <resources>
+              <style name="AppTheme" parent="@android:style/Theme.Material.NoActionBar">
+                  <item name="android:windowBackground">@android:color/black</item>
+                  <item name="android:statusBarColor">@android:color/transparent</item>
+                  <item name="android:navigationBarColor">@android:color/transparent</item>
+              </style>
+          </resources>
+          PINSKIN_EOF
+          cat > 'build.gradle' <<'PINSKIN_EOF'
+          plugins {
+              id 'com.android.application' version '8.5.2' apply false
+          }
+          PINSKIN_EOF
+          cat > 'gradle.properties' <<'PINSKIN_EOF'
+          org.gradle.jvmargs=-Xmx2g
+          android.nonTransitiveRClass=true
+          PINSKIN_EOF
+          cat > 'settings.gradle' <<'PINSKIN_EOF'
+          pluginManagement {
+              repositories { google(); mavenCentral(); gradlePluginPortal() }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+                  maven { url 'https://api.xposed.info/' }
+              }
+          }
+          rootProject.name = 'PinSkin'
+          include ':app'
+          PINSKIN_EOF
+          gradle assembleDebug --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PinSkin-apk
+          path: app/build/outputs/apk/debug/*.apk
